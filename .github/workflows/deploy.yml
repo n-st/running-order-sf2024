@@ -1,0 +1,79 @@
+name: Generate Running Order and upload to GitHub pages
+
+env:
+  GENERATOR_REPO: n-st/running-order-layout-plain
+  DATE_FORMAT: '%d %b %Y, %H:%M'
+
+concurrency:
+  # only run one generator instance at a time to prevent git-push race conditions
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  # only trigger on changes to the default branch (we will be modifying other
+  # branches from the generator script, and need to avoid retriggering
+  # ourselves through our own change)
+  push:
+    branches: [ "main", "master" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out generator repo
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.GENERATOR_REPO }}
+          path: running-order-layout-tool
+
+      - name: Check out data repo (main branch)
+        uses: actions/checkout@v3
+        with:
+          path: input
+
+      - name: Check out data repo (Pages output branch)
+        uses: actions/checkout@v3
+        with:
+          ref: gh-pages
+          path: output
+
+      - name: Get data timestamp and commit
+        working-directory: ./input
+        run: |
+          timezone_offset="$(git log -n 1 --format='%ad' --date=format:'%z' | sed 's/\([+-]\)0/\1/')"
+          etc_timezone="$(printf 'Etc/GMT%+d' $(( -1 * timezone_offset / 100 )) )"
+          printf 'data_commit=%s\n' "$(git describe --always --dirty='*')" >> $GITHUB_ENV
+          printf 'data_changed=%s\n' "$(git log -n 1 --format='%ad' --date=format:'${{ env.DATE_FORMAT }}')" >> $GITHUB_ENV
+          printf 'data_now=%s\n' "$(env TZ="$etc_timezone" date +'${{ env.DATE_FORMAT }}')" >> $GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r running-order-layout-tool/requirements.txt
+
+      - name: Update page HTML
+        run: |
+          python3 running-order-layout-tool/generate.py --metainfo="generated on $data_now; data from $data_changed (commit $data_commit)" < input/running-order.csv > output/index.html
+
+      - name: Commit changes
+        working-directory: ./output
+        run: |
+          git config --local user.email "${{ github.repository_owner }}+running-order-generator@users.noreply.github.com"
+          git config --local user.name "Running Order Generator ($GENERATOR_REPO)"
+          git add -A
+          git commit -m "Generated from commit $data_commit (repo ${{ github.repository }})"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          directory: output
+          branch: gh-pages
